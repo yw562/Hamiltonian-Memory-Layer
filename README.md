@@ -1,7 +1,29 @@
 # Hamiltonian-Memory-Layer
 Physics-inspired Hamiltonian Memory Layer for long-context sequence modeling
 
-> ⚠️ **Disclaimer**: This repository is a **work in progress**.  
-> The Hamiltonian Memory Layer (HML) project explores physics-inspired architectures for long-context sequence modeling.  
-> Early prototype code, experiments, and notes are being developed here and will be expanded into a full **arXiv paper + workshop submission**.  
-> If you are interested in collaborating, please open an issue or contact me.
+├── proposal.md # Full research proposal
+├── src/ # Code implementation (to come)
+├── experiments/ # Training & evaluation scripts
+├── results/ # Plots and logs
+└── README.md # This file
+
+
+---
+
+## 🚀 Next Steps
+See [roadmap.md](roadmap.md) for the 10-week action plan.
+
+---
+
+## 📄 Citation (placeholder)
+If you use this work, please cite:
+
+
+@misc{hml2025,
+title={Hamiltonian Memory Layer for Long-Context Neural Networks},
+author={Your Name},
+year={2025},
+howpublished={GitHub repository},
+url={https://github.com/yourname/Hamiltonian-Memory-Layer}
+
+}
