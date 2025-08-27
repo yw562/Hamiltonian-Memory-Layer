@@ -1,0 +1,216 @@
+# HML vs Mamba-2 — Toy Experiments (Copying & Adding)
+
+A minimal, decision-oriented protocol to evaluate **gradient preservation** and **long-range memory**. Designed for a 1–2 week sprint.
+
+---
+
+## 0) Goals & Hypotheses
+
+* **G1.** Establish whether **Hamiltonian-like inductive bias with learnable dissipation** (HML) preserves gradients better than strong baselines on long synthetic tasks.
+* **G2.** Determine whether improved gradient stability **translates** into better task success **as sequence length grows**.
+* **H1 (Stability):** HML with partial conservation shows flatter log ∥∂L/∂s\_t∥ curves over time than Mamba-2 and LSTM.
+* **H2 (Memory):** HML maintains non-trivial mutual information between early inputs and late states at 10k–100k steps.
+* **H3 (Trade-off):** Too-strong conservation harms expressivity; **moderate dissipation** yields best performance.
+
+**Kill criteria:** If HML fails **both** (i) gradient preservation and (ii) task accuracy beyond 8k steps versus Mamba-2, **stop** scaling.
+
+---
+
+## 1) Tasks
+
+### 1.1 Copying Task (Delayed Copy)
+
+* Alphabet size K=8 (one-hot tokens). Sequence: `A[1:T]` + `blank`×(T) + `marker` + `blank`×(K-1) → Target is `A[1:T]` emitted after marker.
+* Train on T ∈ {1k, 4k, 16k}, test on T ∈ {16k, 64k, 100k}.
+* Metric: **Exact sequence accuracy** (fraction of perfectly copied sequences), and per-token accuracy.
+
+### 1.2 Adding Task
+
+* Length T as above. Inputs: pairs `(u_t, m_t)` where `u_t∼U(0,1)`, `m_t∈{0,1}` marks two positions. Target is sum of the two `u_t` at marked positions.
+* Metric: **MSE** and **success@ε** (|pred−true|≤1e−2).
+
+---
+
+## 2) Models
+
+### 2.1 Hamiltonian Memory Layer (HML)
+
+**State:** s\_t=(q\_t, p\_t) ∈ R^{2D}
+
+**Hamiltonian:** H(q,p)= ½ pᵀM^{-1}p + V\_θ(q), with M=diag(m)>0; V\_θ is an MLP.
+
+**Dissipation (learnable):** γ\_p, γ\_q ≥0 (scalars or diagonal), applied via operator-splitting after a conservative symplectic step.
+
+**Input injection:** e\_t = Emb(x\_t); force via `p ← p + B e_t` (optional `q ← q + A e_t`).
+
+**Integrator (per step, leapfrog + damping):**
+
+1. Conservative (symplectic leapfrog):
+
+   * p\_{t+½} = p\_t − (Δt/2) ∇\_q V(q\_t)
+   * q̃\_{t+1} = q\_t + Δt M^{-1} p\_{t+½}
+   * p̃\_{t+1} = p\_{t+½} − (Δt/2) ∇*q V(q̃*{t+1})
+2. Dissipation + input:
+
+   * p\_{t+1} = (1 − Δt·γ\_p) p̃\_{t+1} + B e\_t
+   * q\_{t+1} = (1 − Δt·γ\_q) q̃\_{t+1} + A e\_t  (optional)
+
+**Readout:** y\_t = W \[q\_{t+1}; p\_{t+1}] + b.
+
+**Energy regularizer (partial conservation):**
+
+* Penalize large *relative* drift when input is blank:
+  $L_{energy} = λ · mean_t 1_{blank(t)} · |H_{t+1}−H_t| / (|H_t|+ε)$
+* With input present, do **not** penalize drift (external work allowed).
+
+**Stability initialization:** small Δt (e.g., 1e−2), M≈I, γ\_p≈γ\_q≈1e−3…1e−2, V\_θ last-layer weights small.
+
+### 2.2 Baselines
+
+* **Mamba-2** (reference open-source impl), hidden dim matched to HML state dim (D), same embedding & head.
+* **LSTM** (strong RNN baseline), similar parameter count.
+
+---
+
+## 3) Training Protocol
+
+* Optimizer: AdamW(lr=1e−3), β=(0.9,0.95), wd=0.01; grad clip=1.0.
+* Batch: 64 for T≤4k, 16 for T=16k, 8 for T≥64k.
+* Steps: 100k for T≤4k; 200k for T=16k; early stop on validation.
+* Curriculum: train on T∈{1k,4k,16k} mixed; evaluate zero-shot on {16k,64k,100k}.
+* Loss: cross-entropy (copy), MSE (adding) + α·L\_energy (α∈{0, 1e−3, 1e−2}).
+* Seeds: 0,1,2. Report mean±std.
+
+---
+
+## 4) Gradient Preservation & Dynamics Diagnostics
+
+**D1. Gradient-through-time profile**
+
+* Save all intermediate states `s_t` with `requires_grad=True`.
+* Backprop once from loss at final time; record `g_t = ∥∂L/∂s_t∥₂` via hooks.
+* Plot `log g_t` vs `t` (expect flatter for HML).
+
+**D2. Local Jacobian spectral proxy**
+
+* Estimate the spectral radius ρ(J\_t) of the step map using power iteration on linearized update around s\_t (few iterations, no full Jacobian storage).
+* Report median ρ across time.
+
+**D3. Information retention curve**
+
+* Train a **frozen** HML/Mamba, then fit a linear probe to predict early token x\_τ from s\_t at t=τ+k for k∈{1k,4k,16k}. Plot probe accuracy vs k.
+
+**D4. Energy drift & noise robustness**
+
+* Plot H\_t over time under blank input. Inject small Gaussian noise to inputs; measure performance drop.
+
+---
+
+## 5) Ablations
+
+* A1: γ=0 (strict symplectic) vs γ learnable (diag) vs γ fixed (scalar).
+* A2: Input injection on p only vs p+q.
+* A3: Symplectic leapfrog vs standard Euler (non-symplectic).
+* A4: Energy regularizer weight α ∈ {0, 1e−3, 1e−2}.
+* A5: Δt ∈ {1e−3,1e−2,5e−2}.
+
+---
+
+## 6) Expected Signatures (Decision Rules)
+
+* **Win condition (stability):** For T=16k, HML shows ≥2× higher `g_{early}/g_{late}` ratio and flatter `log g_t` slope than Mamba/LSTM.
+* **Translation test:** If gradient stability improves but task accuracy does not, run probes (D3). If probes show higher recoverability at large k, claim **stability≠sample-efficiency**, report as insight.
+* **Kill:** If HML is worse on both `log g_t` slope and task accuracy after A1–A5 tuning, stop.
+
+---
+
+## 7) Reference PyTorch Skeleton (HML Cell)
+
+```python
+class HMLCell(nn.Module):
+    def __init__(self, d, dt=1e-2, damp_p=1e-3, damp_q=1e-3, inj_q=False):
+        super().__init__()
+        self.d, self.dt = d, dt
+        self.M_inv = nn.Parameter(torch.ones(d))  # positive with softplus if needed
+        self.V = nn.Sequential(nn.Linear(d, 4*d), nn.Tanh(), nn.Linear(4*d, 1))
+        self.B = nn.Linear(d, d, bias=False)
+        self.A = nn.Linear(d, d, bias=False) if inj_q else None
+        self.gamma_p = nn.Parameter(torch.full((d,), damp_p))
+        self.gamma_q = nn.Parameter(torch.full((d,), damp_q))
+        self.out = nn.Linear(2*d, d)
+
+    def dVdq(self, q):
+        q = q.requires_grad_(True)
+        V = self.V(q).sum()  # scalar
+        (grad_q,) = torch.autograd.grad(V, q, create_graph=True)
+        return grad_q
+
+    def step(self, q, p, e_t):
+        dt = self.dt
+        # Conservative leapfrog
+        dVq = self.dVdq(q)
+        p_half = p - 0.5*dt*dVq
+        q_tilde = q + dt * (self.M_inv * p_half)
+        dVq_next = self.dVdq(q_tilde)
+        p_tilde = p_half - 0.5*dt*dVq_next
+        # Dissipation + input
+        p_new = (1 - dt*F.softplus(self.gamma_p)) * p_tilde + self.B(e_t)
+        if self.A is not None:
+            q_new = (1 - dt*F.softplus(self.gamma_q)) * q_tilde + self.A(e_t)
+        else:
+            q_new = (1 - dt*F.softplus(self.gamma_q)) * q_tilde
+        y = self.out(torch.cat([q_new, p_new], dim=-1))
+        return q_new, p_new, y
+```
+
+**Logging gradient norms**
+
+```python
+states = []
+q, p = torch.zeros(B, D, requires_grad=True), torch.zeros(B, D, requires_grad=True)
+for t in range(T):
+    q, p, y = cell.step(q, p, e[t])
+    states.append((q, p))
+# compute loss ...
+loss.backward()
+with torch.no_grad():
+    g = [torch.linalg.vector_norm(q.grad, 2, dim=-1).mean().item() +
+         torch.linalg.vector_norm(p.grad, 2, dim=-1).mean().item() for (q,p) in states]
+```
+
+---
+
+## 8) Plots to Produce
+
+* P1: Copy accuracy vs T (1k→100k), curves for HML/Mamba/LSTM.
+* P2: `log ∥∂L/∂s_t∥` vs t at T=16k.
+* P3: Probe accuracy vs lag k.
+* P4: Energy H\_t under blank input; with/without dissipation.
+* P5: Robustness: performance vs input noise σ.
+
+---
+
+## 9) Reporting Template (Paper-ready)
+
+* **Figure 1**: Gradient profiles (P2) — HML flatter than baselines.
+* **Figure 2**: Copy accuracy vs T — breakpoint where baselines fail.
+* **Figure 3**: Probe recoverability — HML retains info at long lags.
+* **Table 1**: Ablation A1–A5.
+* **Appendix**: Implementation details, hyperparams, seeds.
+
+---
+
+## 10) Parallelization Sketch (for proposal text)
+
+* **Associative scan on linearized blocks**: Linearize the update around s\_t, yielding block-bidiagonal structure across time; use parallel prefix (Blelloch scan) on block matrices to compute states in O(n log n). Use as an *approximate* parallelizer during training for chunks.
+* **Convolutional approximation**: For small dt, the map approaches an LTI kernel with data-dependent coefficients; approximate via low-rank convolution (similar spirit to SSMs) learned from short windows; validate equivalence empirically.
+* **Chunked reversible integration**: Exploit near-reversibility to recompute states on the fly (activation checkpointing) and enable large T without memory blowup.
+
+---
+
+## 11) One-week Sprint Plan
+
+* **Day 1–2**: Implement HMLCell + datasets; sanity-check on T=1k.
+* **Day 3–4**: Add gradient logging + energy regularizer; run T=4k/16k; produce P2, P4.
+* **Day 5**: Add probes; run T=16k; produce P3.
+* **Day 6–7**: Baselines (Mamba-2/LSTM), ablations A1–A5; compile P1–P5; decide go/no-go.
